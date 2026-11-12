@@ -231,6 +231,40 @@ def processa_dfp(ano):
     return saida
 
 
+def processa_itr(dfp):
+    """lucro dos últimos 12 meses: acumulado do ano + ano anterior fechado − acumulado do ano anterior"""
+    for ano in (ANO_FIM, ANO_FIM - 1):
+        if ano in dfp:
+            return {}
+        if ano - 1 not in dfp:
+            continue
+        dados = baixa(f"{BASE}/DOC/ITR/DADOS/itr_cia_aberta_{ano}.zip")
+        if not dados:
+            continue
+        z = zipfile.ZipFile(io.BytesIO(dados))
+        res = {}
+        for nome in (f"DRE_con_{ano}", f"DRE_ind_{ano}"):
+            linhas = arquivo(z, nome)
+            if not linhas:
+                continue
+            g = por_empresa(linhas)
+            for cnpj, rows in g.items():
+                if cnpj in res:
+                    continue
+                ref = max(l["DT_REFER"] for l in rows)
+                rows = [l for l in rows if l["DT_REFER"] == ref]
+                ver = max(int(l.get("VERSAO") or 0) for l in rows)
+                rows = [l for l in rows if int(l.get("VERSAO") or 0) == ver]
+                ytd = lucro_de(rows, lambda l: ultimo(l) and l.get("DT_INI_EXERC", "").startswith(f"{ano}-01-01"))
+                ant = lucro_de(rows, lambda l: penultimo(l) and l.get("DT_INI_EXERC", "").startswith(f"{ano-1}-01-01"))
+                base = dfp[ano - 1].get(cnpj, {}).get("lucro")
+                if ytd is not None and ant is not None and base is not None:
+                    res[cnpj] = {"ano": ano, "ref": ref, "lucro": ytd + base - ant}
+        log(f"ITR {ano}: lucro dos últimos 12 meses de {len(res)} empresas")
+        return res
+    return {}
+
+
 def processa_fca():
     for ano in range(ANO_FIM, ANO_FIM - 3, -1):
         dados = baixa(f"{BASE}/DOC/FCA/DADOS/fca_cia_aberta_{ano}.zip")
@@ -337,6 +371,7 @@ def main():
     if not anos_dfp:
         log("Nenhuma DFP baixada. Parando.")
         sys.exit(1)
+    itr = processa_itr(anos_dfp)
     fca = processa_fca()
     cad = processa_cadastro()
     todos = sorted(anos_dfp)
@@ -379,6 +414,7 @@ def main():
             "ebitda": mi(ebitda),
             "divliq": mi((ult["divb"] or 0) - (ult["caixa"] or 0)) if not ult["fin"] else None,
             "da_ok": 1 if ult["da"] else 0,
+            "ttm": None if cnpj not in itr else {"ano": itr[cnpj]["ano"], "ref": itr[cnpj]["ref"], "lucro": mi(itr[cnpj]["lucro"])},
             "a": a,
         })
     os.makedirs(os.path.dirname(SAIDA) or ".", exist_ok=True)
@@ -392,12 +428,13 @@ def main():
         json.dump(out, fh, ensure_ascii=False, separators=(",", ":"))
     log(f"Gravado {SAIDA}: {len(emp)} empresas, {os.path.getsize(SAIDA)//1024} KB")
     # conferência: alguns nomes conhecidos, para comparar com sites como Status Invest e Investidor 10
-    resumo = ["| Ticker | Último ano | Lucro (R$ mi) | LPA | Dív. líq./EBITDA | Segmento | Listagem |", "|---|---|---|---|---|---|---|"]
+    resumo = ["| Ticker | Último ano | Lucro (R$ mi) | LPA | Dív. líq./EBITDA | Segmento | Listagem | Lucro 12 meses |", "|---|---|---|---|---|---|---|---|"]
     for t in ["CXSE3", "ITUB3", "WEGE3", "PETR4", "BBAS3", "EGIE3", "RADL3", "TAEE11"]:
         e = next((x for x in emp if t in x["tk"]), None)
         if e:
             u = e["a"][str(e["ult"])]
-            resumo.append(f"| {t} | {e['ult']} | {u[0]} | {u[1]} | {e['dl']} | {e['seg']} | {e['ipo']} |")
+            tt = e.get("ttm") or {}
+            resumo.append(f"| {t} | {e['ult']} | {u[0]} | {u[1]} | {e['dl']} | {e['seg']} | {e['ipo']} | {tt.get('lucro')} até {tt.get('ref')} |")
         else:
             resumo.append(f"| {t} | não encontrado | | | | | |")
     resumo += ["", "**Escala do LPA declarada (linha 3.99) em algumas empresas:**", ""]
