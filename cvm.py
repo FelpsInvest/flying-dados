@@ -126,15 +126,20 @@ R_LUCRO = re.compile(r"^LUCRO\s*/?\s*(OU\s+)?PREJUIZO\s+(LIQUIDO\s+)?(CONSOLIDAD
 
 
 def lucro_de(rows, quem):
+    """lucro dos controladores; se a linha vier zerada, usa o lucro total do período"""
     rs = [l for l in rows if quem(l)]
     cand = [l for l in rs if R_CONTROL.search(sem_acento(l["DS_CONTA"])) and l["CD_CONTA"].startswith("3.")]
-    if cand:
-        cand.sort(key=lambda l: len(l["CD_CONTA"]))
-        return valor(cand[0])
+    cand.sort(key=lambda l: len(l["CD_CONTA"]))
+    for l in cand:
+        v = valor(l)
+        if v:
+            return v
     cand = [l for l in rs if R_LUCRO.search(sem_acento(l["DS_CONTA"])) and l["CD_CONTA"].count(".") == 1]
-    if cand:
-        cand.sort(key=lambda l: l["CD_CONTA"])
-        return valor(cand[-1])
+    cand.sort(key=lambda l: l["CD_CONTA"], reverse=True)
+    for l in cand:
+        v = valor(l)
+        if v:
+            return v
     return None
 
 
@@ -190,6 +195,8 @@ def processa_dfp(ano):
     for cnpj in set(dre_c) | set(dre_i):
         dre = dre_c.get(cnpj) or dre_i.get(cnpj)
         con = cnpj in dre_c
+        if con and not lucro_de(dre, ultimo) and cnpj in dre_i and lucro_de(dre_i[cnpj], ultimo):
+            dre, con = dre_i[cnpj], False
         bpa = (bpa_c if con else bpa_i).get(cnpj, [])
         bpp = (bpp_c if con else bpp_i).get(cnpj, [])
         dfc = (dfc_c if con else dfc_i).get(cnpj, [])
@@ -218,6 +225,7 @@ def processa_dfp(ano):
             "caixa": caixa,
             "fin": fin,
             "acoes": cap.get(cnpj),
+            "lpa_desc": next((l["DS_CONTA"] for l in dre if l["CD_CONTA"] == "3.99"), ""),
         }
     log(f"DFP {ano}: {len(saida)} empresas")
     return saida
@@ -239,13 +247,11 @@ def processa_fca():
         res = {}
         for l in vm:
             tk = sem_acento(l.get(ct, "")).replace(" ", "")
-            if not re.fullmatch(r"[A-Z]{4}\d{1,2}", tk):
+            if not re.fullmatch(r"[A-Z][A-Z0-9]{3}\d{1,2}", tk):
                 continue
-            if cv and not re.search(r"ACAO|ACOES|UNIT|CERTIFICADO", sem_acento(l.get(cv, ""))):
+            if cv and re.search(r"DEBENTURE|NOTA|BONUS|DIREITO|RECIBO", sem_acento(l.get(cv, ""))):
                 continue
-            if cm and l.get(cm) and "BOLSA" not in sem_acento(l.get(cm)):
-                continue
-            if cf and (l.get(cf) or "").strip():
+            if cm and l.get(cm) and "BALCAO" in sem_acento(l.get(cm)):
                 continue
             e = res.setdefault(l[cc], {"tk": set(), "seg": "", "ini": []})
             e["tk"].add(tk)
@@ -335,12 +341,16 @@ def main():
     cad = processa_cadastro()
     todos = sorted(anos_dfp)
     emp = []
+    fora = {}
     for cnpj in sorted(set().union(*[set(v) for v in anos_dfp.values()])):
         f = fca.get(cnpj)
+        nome = cad.get(cnpj, {}).get("nome") or next(anos_dfp[a][cnpj]["nome"] for a in todos if cnpj in anos_dfp[a])
         if not f or not f["tk"]:
+            fora[nome] = "sem código de negociação no FCA"
             continue
         anos = [a for a in todos if cnpj in anos_dfp[a] and anos_dfp[a][cnpj]["lucro"] is not None]
         if len(anos) < 2:
+            fora[nome] = f"só {len(anos)} ano(s) com lucro identificado"
             continue
         por_ano = {a: anos_dfp[a][cnpj] for a in anos}
         ult = por_ano[anos[-1]]
@@ -390,6 +400,15 @@ def main():
             resumo.append(f"| {t} | {e['ult']} | {u[0]} | {u[1]} | {e['dl']} | {e['seg']} | {e['ipo']} |")
         else:
             resumo.append(f"| {t} | não encontrado | | | | | |")
+    resumo += ["", "**Escala do LPA declarada (linha 3.99) em algumas empresas:**", ""]
+    for t in ["CXSE3", "ITUB3", "WEGE3", "ABEV3", "TAEE11"]:
+        e = next((x for x in emp if t in x["tk"]), None)
+        if e:
+            resumo.append(f"- {t}: {anos_dfp[e['ult']][e['cnpj']].get('lpa_desc', '')}")
+    alvo = re.compile(r"ITAUSA|B3 S|BRASIL BOLSA|KLABIN|AMBEV|VALE|SUZANO|GERDAU|ELETROBRAS|AXIA|EQUATORIAL|TOTVS|EMBRAER")
+    resumo += ["", "**Empresas conhecidas que ficaram de fora:**", ""]
+    resumo += [f"- {n}: {m}" for n, m in sorted(fora.items()) if alvo.search(sem_acento(n))] or ["- nenhuma"]
+    resumo += ["", f"Total fora do arquivo: {len(fora)}"]
     texto = "\n".join(resumo)
     log(texto)
     if os.environ.get("GITHUB_STEP_SUMMARY"):
