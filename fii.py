@@ -208,11 +208,11 @@ def informe_trimestral():
 def yahoo(tk):
     u = f"https://query1.finance.yahoo.com/v8/finance/chart/{tk}.SA?range=7y&interval=1mo&events=div&includeAdjustedClose=true"
     d = None
-    for t in range(3):
+    for t in range(2):
         d = baixa(u, tentativas=1, ua=UA)
         if d:
             break
-        time.sleep(3 * (t + 1))
+        time.sleep(2)
     if not d:
         return None
     try:
@@ -377,7 +377,11 @@ def main():
     if YAHOO:
         ok = 0
         falhas = []
+        limite = time.time() + float(os.environ.get("YAHOO_MAX_MIN", "18")) * 60  # nunca passa disso, para o robô não travar
         for i, f in enumerate(out):
+            if time.time() > limite:
+                log(f"  Yahoo: tempo esgotado em {i}/{len(out)}; o resto fica com os rendimentos pela CVM")
+                break
             m = mercado(f["tk"])
             if m:
                 f.update(m)
@@ -391,6 +395,8 @@ def main():
             log(f"  Yahoo: tentando de novo {len(falhas)} fundos")
             time.sleep(30)
             for f in falhas:
+                if time.time() > limite:
+                    break
                 m = mercado(f["tk"])
                 if m:
                     f.update(m)
