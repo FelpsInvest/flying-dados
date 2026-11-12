@@ -69,7 +69,13 @@ def le_csv(dados):
         texto = dados.decode("utf-8")
     except UnicodeDecodeError:
         texto = dados.decode("latin-1")
-    return list(csv.DictReader(io.StringIO(texto.lstrip("﻿")), delimiter=";"))
+    linhas = list(csv.DictReader(io.StringIO(texto.lstrip("﻿")), delimiter=";"))
+    # a CVM renomeou colunas com a Resolução 175 (CNPJ_Fundo virou CNPJ_Fundo_Classe etc.); anos antigos e novos
+    # vêm juntos, então os nomes são padronizados linha a linha: maiúsculas, sem acento e sem o sufixo _CLASSE
+    def pad(k):
+        k = sem_acento(k or "").replace(" ", "_")
+        return re.sub(r"_CLASSE(?=_|$)", "", k)
+    return [{pad(k): v for k, v in l.items()} for l in linhas]
 
 
 def arquivos(z, trecho):
@@ -143,62 +149,57 @@ def informes_mensais():
 
 # ---------------- informe trimestral (imóveis) ----------------
 def informe_trimestral():
+    """imóveis do informe trimestral. A CVM separa os imóveis em vários arquivos (renda acabados, em construção,
+    para venda, terrenos...); a vacância e a inadimplência ficam no de imóveis para renda acabados."""
     for ano in (ANO_FIM, ANO_FIM - 1):
         d = baixa(f"{BASE}/INF_TRIMESTRAL/DADOS/inf_trimestral_fii_{ano}.zip")
         if not d:
             continue
         z = zipfile.ZipFile(io.BytesIO(d))
-        nomes = [n for n in z.namelist() if "imovel" in n.lower() and "renda" not in n.lower() and "contrato" not in n.lower()]
-        linhas = []
-        for n in nomes:
-            linhas += le_csv(z.read(n))
-        if not linhas:
-            # nomes diferentes: pega qualquer arquivo de imóvel
-            linhas = arquivos(z, "imovel")
+        nomes = [n for n in z.namelist() if "imovel" in n.lower() and not re.search(r"contrato|inquilino", n.lower())]
         RESUMO.append(f"- arquivos do informe trimestral {ano}: `{', '.join(z.namelist())}`")
-        RESUMO.append(f"- colunas de imóveis: `{', '.join(list(linhas[0].keys())[:40]) if linhas else 'nenhuma'}`")
-        if not linhas:
+        if not nomes:
             continue
-        c = Col(linhas)
-        kc, kd, kv = c(r"CNPJ_FUNDO.*"), c(r"DATA_REFERENCIA"), c(r"VERSAO")
-        kn = c(r"NOME_IMOVEL", r"NOME.*")
-        kvac = c(r"PERCENTUAL_VACANCIA.*", r".*VACANCIA.*")
-        kina = c(r"PERCENTUAL_INADIMPLENCIA.*", r".*INADIMPLENCIA.*")
-        krec = c(r"PERCENTUAL_RECEITAS?_FII.*", r".*RECEITA.*")
-        karea = c(r"AREA.*")
         ultimo = {}
-        for l in linhas:
-            cn = (l.get(kc) or "").strip()
-            ref = ((l.get(kd) or ""), int(num(l.get(kv)) or 0))
-            if not cn:
+        for n in nomes:
+            linhas = le_csv(z.read(n))
+            if not linhas:
                 continue
-            if cn not in ultimo or ref > ultimo[cn][0]:
-                ultimo[cn] = (ref, [])
-            if ref == ultimo[cn][0]:
-                ultimo[cn][1].append(l)
-        res = {}
-        for cn, (ref, ls) in ultimo.items():
-            nomes_im = {sem_acento(l.get(kn) or str(i)) for i, l in enumerate(ls)}
-            pesos, vac, ina = [], [], []
-            for l in ls:
+            c = Col(linhas)
+            RESUMO.append(f"- colunas de `{n}`: `{', '.join(c.k[:40])}`")
+            kc, kd, kv = c(r"CNPJ_FUNDO.*"), c(r"DATA_REFERENCIA"), c(r"VERSAO")
+            kn = c(r"NOME_IMOVEL", r"NOME.*", r"ENDERECO.*")
+            kvac = c(r"PERCENTUAL_VACANCIA.*", r".*VACANCIA.*")
+            kina = c(r"PERCENTUAL_INADIMPLENCIA.*", r".*INADIMPLENCIA.*")
+            krec = c(r"PERCENTUAL_RECEITAS?_FII.*", r"PERCENTUAL_RECEITA.*")
+            karea = c(r"AREA.*")
+            for i, l in enumerate(linhas):
+                cn = (l.get(kc) or "").strip()
+                if not cn:
+                    continue
+                ref = ((l.get(kd) or ""), int(num(l.get(kv)) or 0))
+                u = ultimo.get(cn)
+                if u is None or ref > u["ref"]:
+                    u = ultimo[cn] = {"ref": ref, "nomes": set(), "vac": [], "ina": []}
+                if ref != u["ref"]:
+                    continue
+                u["nomes"].add(sem_acento(l.get(kn) or (n + str(i))))
                 p = num(l.get(krec)) if krec else None
-                if p is None and karea:
+                if (p is None or p <= 0) and karea:
                     p = num(l.get(karea))
                 p = p if p and p > 0 else 1.0
-                v = num(l.get(kvac)) if kvac else None
-                i = num(l.get(kina)) if kina else None
-                pesos.append(p)
-                vac.append(v)
-                ina.append(i)
+                if kvac and num(l.get(kvac)) is not None:
+                    u["vac"].append((num(l.get(kvac)), p))
+                if kina and num(l.get(kina)) is not None:
+                    u["ina"].append((num(l.get(kina)), p))
 
-            def media(vals):
-                par = [(v, p) for v, p in zip(vals, pesos) if v is not None]
-                if not par:
-                    return None
-                m = sum(v * p for v, p in par) / sum(p for _, p in par)
-                return m * 100 if m <= 1.0001 and max(v for v, _ in par) <= 1.0001 else m  # aceita fração ou percentual
-            res[cn] = {"ref": ref[0], "imoveis": len(nomes_im), "vacF": media(vac), "inad": media(ina)}
-        log(f"informe trimestral {ano}: imóveis de {len(res)} fundos")
+        def media(par):
+            if not par:
+                return None
+            m = sum(v * p for v, p in par) / sum(p for _, p in par)
+            return m * 100 if max(v for v, _ in par) <= 1.0001 else m  # aceita fração (0,05) ou percentual (5)
+        res = {cn: {"ref": u["ref"][0], "imoveis": len(u["nomes"]), "vacF": media(u["vac"]), "inad": media(u["ina"])} for cn, u in ultimo.items()}
+        log(f"informe trimestral {ano}: imóveis de {len(res)} fundos, vacância de {sum(1 for r in res.values() if r['vacF'] is not None)}")
         return res
     return {}
 
@@ -206,7 +207,12 @@ def informe_trimestral():
 # ---------------- Yahoo: rendimentos e retorno total ----------------
 def yahoo(tk):
     u = f"https://query1.finance.yahoo.com/v8/finance/chart/{tk}.SA?range=7y&interval=1mo&events=div&includeAdjustedClose=true"
-    d = baixa(u, tentativas=2, ua=UA)
+    d = None
+    for t in range(3):
+        d = baixa(u, tentativas=1, ua=UA)
+        if d:
+            break
+        time.sleep(3 * (t + 1))
     if not d:
         return None
     try:
@@ -216,7 +222,10 @@ def yahoo(tk):
         return None
     ts = r.get("timestamp") or []
     fe = ((r.get("indicators") or {}).get("quote") or [{}])[0].get("close") or []
+    vo = ((r.get("indicators") or {}).get("quote") or [{}])[0].get("volume") or []
     pts = [(datetime.fromtimestamp(t, timezone.utc).date().isoformat(), c) for t, c in zip(ts, fe) if c]
+    giro = [c * v for c, v in zip(fe, vo) if c and v][-6:]
+    yahoo.liq = (sum(giro) / len(giro) / 21 / 1e6) if giro else None
     div = sorted((datetime.fromtimestamp(v["date"], timezone.utc).date().isoformat(), float(v["amount"]))
                  for v in ((r.get("events") or {}).get("dividends") or {}).values() if v.get("amount"))
     return pts, div
@@ -253,7 +262,7 @@ def mercado(tk):
     rend = {}
     for d, v in div:
         rend[d[:4]] = rend.get(d[:4], 0) + v
-    return {"rt": rt, "rend": {k: round(v, 4) for k, v in sorted(rend.items())}, "px": pts[-1][1]}
+    return {"rt": rt, "rend": {k: round(v, 4) for k, v in sorted(rend.items())}, "px": pts[-1][1], "liqY": None if getattr(yahoo, "liq", None) is None else round(yahoo.liq, 3)}
 
 
 def main():
@@ -301,9 +310,12 @@ def main():
         papel = v(r"CRI") + v(r"LCI") + v(r"LIG") + v(r"LETRAS_HIPOTECARIAS") + v(r"DEBENTURES") + v(r"CERTIFICADOS?_DEPOSITO.*") + v(r"NOTAS_PROMISSORIAS")
         fof = v(r"FII")
         tot = imov + papel + fof
+        if re.search(r"LOGISTIC|SHOPPING|LAJE|HOTEL|HOSPITAL|RESIDENC|AGENCIA|EDUCAC|VAREJO|INDUSTR", sem_acento(g.get(cg(r"SEGMENTO_ATUACAO.*")) or "")):
+            imov, fof = imov + fof, 0.0  # fundo de imóveis que tem parte dos imóveis por meio de outro FII
+            tot = imov + papel
         if tot <= 0:
             tipo = "Outro"
-        elif fof / tot >= 0.5:
+        elif fof / tot >= 0.5 and not re.search(r"LOGISTIC|SHOPPING|LAJE|HOTEL|HOSPITAL|RESIDENC|AGENCIA|EDUCAC|VAREJO|INDUSTR", sem_acento(g.get(cg(r"SEGMENTO_ATUACAO.*")) or "")):
             tipo = "FoF"
         elif imov / tot >= 0.75:
             tipo = "Tijolo"
@@ -353,18 +365,37 @@ def main():
             "inad": None if t.get("inad") is None else round(t["inad"], 2), "refTri": t.get("ref"),
             "rendCvm": {k: round(x, 4) for k, x in sorted(rend_cvm.items())},
         })
-    log(f"{len(out)} FIIs com ticker ({sem_tk} sem código de negociação)")
+    # se o fundo mudou de CNPJ (classe nova da Resolução 175), fica só o registro com o informe mais recente
+    por_tk = {}
+    for f in out:
+        if f["tk"] not in por_tk or (f["ref"] or "") > (por_tk[f["tk"]]["ref"] or ""):
+            por_tk[f["tk"]] = f
+    antigos = [f for f in por_tk.values() if (f["ref"] or "") < f"{ANO_FIM - 1}"]
+    out = [f for f in por_tk.values() if f not in antigos]
+    log(f"{len(out)} FIIs com ticker ({sem_tk} sem código de negociação; {len(antigos)} sem informe recente, fora)")
 
     if YAHOO:
         ok = 0
+        falhas = []
         for i, f in enumerate(out):
             m = mercado(f["tk"])
             if m:
                 f.update(m)
                 ok += 1
-            time.sleep(0.35)
+            else:
+                falhas.append(f)
+            time.sleep(0.8)
             if i % 50 == 0:
                 log(f"  Yahoo: {i}/{len(out)}")
+        if falhas:
+            log(f"  Yahoo: tentando de novo {len(falhas)} fundos")
+            time.sleep(30)
+            for f in falhas:
+                m = mercado(f["tk"])
+                if m:
+                    f.update(m)
+                    ok += 1
+                time.sleep(1.5)
         log(f"Yahoo: cotação e rendimentos de {ok} fundos")
 
     os.makedirs(os.path.dirname(SAIDA) or ".", exist_ok=True)
