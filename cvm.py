@@ -234,7 +234,9 @@ def processa_dfp(ano):
 def processa_itr(dfp):
     """lucro dos últimos 12 meses: acumulado do ano + ano anterior fechado − acumulado do ano anterior"""
     for ano in (ANO_FIM, ANO_FIM - 1):
-        if ano in dfp:
+        # a CVM abre o arquivo DFP do ano corrente com poucas empresas (exercício fora do ano civil);
+        # só considera o ano fechado quando a maioria já entregou o balanço anual
+        if len(dfp.get(ano, {})) > 100:
             return {}
         if ano - 1 not in dfp:
             continue
@@ -257,6 +259,8 @@ def processa_itr(dfp):
                 rows = [l for l in rows if int(l.get("VERSAO") or 0) == ver]
                 ytd = lucro_de(rows, lambda l: ultimo(l) and l.get("DT_INI_EXERC", "").startswith(f"{ano}-01-01"))
                 ant = lucro_de(rows, lambda l: penultimo(l) and l.get("DT_INI_EXERC", "").startswith(f"{ano-1}-01-01"))
+                if cnpj in dfp.get(ano, {}):
+                    continue
                 base = dfp[ano - 1].get(cnpj, {}).get("lucro")
                 if ytd is not None and ant is not None and base is not None:
                     res[cnpj] = {"ano": ano, "ref": ref, "lucro": ytd + base - ant}
