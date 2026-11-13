@@ -19,6 +19,8 @@ YAHOO = os.environ.get("YAHOO", "1") == "1"
 csv.field_size_limit(10**8)
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
 RESUMO = []
+DEBUG = {}
+DEBUG_TK = ("MXRF11", "BRCO11", "KNCR11", "HGLG11")
 
 
 def log(*a):
@@ -72,10 +74,15 @@ def le_csv(dados):
     linhas = list(csv.DictReader(io.StringIO(texto.lstrip("﻿")), delimiter=";"))
     # a CVM renomeou colunas com a Resolução 175 (CNPJ_Fundo virou CNPJ_Fundo_Classe etc.); anos antigos e novos
     # vêm juntos, então os nomes são padronizados linha a linha: maiúsculas, sem acento e sem o sufixo _CLASSE
-    def pad(k):
-        k = sem_acento(k or "").replace(" ", "_")
-        return re.sub(r"_CLASSE(?=_|$)", "", k)
-    return [{pad(k): v for k, v in l.items()} for l in linhas]
+    if not linhas:
+        return []
+    base = {k: sem_acento(k or "").replace(" ", "_") for k in linhas[0].keys()}
+    usados = set(base.values())
+    mapa = {}
+    for k, b in base.items():
+        s = re.sub(r"_CLASSE(?=_|$)", "", b)
+        mapa[k] = s if (s == b or s not in usados) else b
+    return [{mapa.get(k, k): v for k, v in l.items()} for l in linhas]
 
 
 def arquivos(z, trecho):
@@ -138,12 +145,13 @@ def informes_mensais():
             continue
         z = zipfile.ZipFile(io.BytesIO(d))
         g, c, a = arquivos(z, "geral"), arquivos(z, "complemento"), arquivos(z, "ativo_passivo")
+        if ano >= ANO_FIM - 1:
+            for nome, L in (("geral", g), ("complemento", c), ("ativo_passivo", a)):
+                RESUMO.append(f"- {ano} {nome}: `{', '.join(list(L[0].keys())) if L else 'nenhuma'}`")
         log(f"informe mensal {ano}: {len(g)} geral, {len(c)} complemento, {len(a)} ativo/passivo")
         geral += g
         comp += c
         ap += a
-    for nome, L in (("geral", geral), ("complemento", comp), ("ativo_passivo", ap)):
-        RESUMO.append(f"- colunas do informe mensal {nome}: `{', '.join(list(L[0].keys())[:60]) if L else 'nenhuma'}`")
     return geral, comp, ap
 
 
@@ -177,6 +185,7 @@ def informe_trimestral():
                 cn = (l.get(kc) or "").strip()
                 if not cn:
                     continue
+                DEBUG.setdefault("tri", {}).setdefault(cn, []).append((n, l))
                 ref = ((l.get(kd) or ""), int(num(l.get(kv)) or 0))
                 u = ultimo.get(cn)
                 if u is None or ref > u["ref"]:
@@ -285,6 +294,7 @@ def main():
         if cn and dref:
             hist.setdefault(cn, {})[dref] = l  # a versão mais nova sobrescreve
     tri = informe_trimestral()
+    DEBUG.update({"G": G, "C": C, "A": A})
 
     kc = cg(r"CNPJ_FUNDO.*")
     out, sem_tk = [], 0
@@ -415,6 +425,16 @@ def main():
         if f["tk"] in conf:
             linhas.append(f"| {f['tk']} | {f['tipo']} | {f['pl']} | {f['vp']} | {f['taxa']} | {f['div']} | {f['imoveis']} | {f['vacF']} | {f['inad']} | {None if f.get('rt') is None else round(f['rt'], 1)} | {dict(list((f.get('rend') or {}).items())[-6:])} |")
     linhas += ["", "### Colunas encontradas (para conferência)"] + RESUMO
+    linhas += ["", "### Linhas brutas de conferência"]
+    for f in out:
+        if f["tk"] in DEBUG_TK:
+            cn = f["cnpj"]
+            for nome in ("G", "A"):
+                l = DEBUG.get(nome, {}).get(cn, {})
+                linhas.append(f"- {f['tk']} {nome}: `{json.dumps({k: v for k, v in l.items() if v not in ('', None, '0', '0.0', '0.00')}, ensure_ascii=False)[:1500]}`")
+            ultimos = [x for x in DEBUG.get("tri", {}).get(cn, [])][-4:]
+            for n, l in ultimos:
+                linhas.append(f"- {f['tk']} imóvel ({n}): `{json.dumps({k: v for k, v in l.items() if v not in ('', None)}, ensure_ascii=False)[:600]}`")
     if os.environ.get("GITHUB_STEP_SUMMARY"):
         with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as s:
             s.write("\n".join(linhas) + "\n")
