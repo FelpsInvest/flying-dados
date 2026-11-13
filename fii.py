@@ -274,6 +274,21 @@ def mercado(tk):
     return {"rt": rt, "rend": {k: round(v, 4) for k, v in sorted(rend.items())}, "px": pts[-1][1], "liqY": None if getattr(yahoo, "liq", None) is None else round(yahoo.liq, 3)}
 
 
+def debug_info(out):
+    """conferência gravada junto dos dados: colunas de cada arquivo e as linhas cruas de alguns fundos"""
+    linhas = {}
+    for f in out:
+        if f["tk"] in DEBUG_TK:
+            cn = f["cnpj"]
+            linhas[f["tk"]] = {
+                "geral": DEBUG.get("G", {}).get(cn, {}),
+                "complemento": DEBUG.get("C", {}).get(cn, {}),
+                "ativo_passivo": DEBUG.get("A", {}).get(cn, {}),
+                "imoveis": [dict(l, _arquivo=n) for n, l in DEBUG.get("tri", {}).get(cn, [])][-6:],
+            }
+    return {"colunas": RESUMO, "linhas": linhas}
+
+
 def main():
     geral, comp, ap = informes_mensais()
     if not geral:
@@ -416,7 +431,7 @@ def main():
 
     os.makedirs(os.path.dirname(SAIDA) or ".", exist_ok=True)
     with open(SAIDA, "w", encoding="utf-8") as fo:
-        json.dump({"gerado": datetime.now(timezone.utc).isoformat(timespec="seconds"), "fonte": "CVM (informes mensal e trimestral de FII) e Yahoo Finance", "fii": out}, fo, ensure_ascii=False, separators=(",", ":"))
+        json.dump({"gerado": datetime.now(timezone.utc).isoformat(timespec="seconds"), "fonte": "CVM (informes mensal e trimestral de FII) e Yahoo Finance", "fii": out, "debug": debug_info(out)}, fo, ensure_ascii=False, separators=(",", ":"))
     log(f"Gravado {SAIDA}")
 
     conf = ["HGLG11", "KNRI11", "MXRF11", "XPML11", "KNCR11", "VISC11", "BTLG11", "HGRU11"]
